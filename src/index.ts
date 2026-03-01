@@ -118,6 +118,10 @@ export default function copilotQueueExtension(pi: ExtensionAPI) {
       return { action: "continue" };
     }
 
+    if (!state.captureInteractiveInput) {
+      return { action: "continue" };
+    }
+
     const text = event.text.trim();
     if (!text) {
       return { action: "handled" };
@@ -187,6 +191,31 @@ export default function copilotQueueExtension(pi: ExtensionAPI) {
             released
               ? "Released waiting ask_user with 'done'. Queue cleared and autopilot disabled."
               : "Queue cleared and autopilot disabled."
+          );
+          return Promise.resolve();
+        }
+
+        case "capture": {
+          const mode = command.mode.trim().toLowerCase();
+          if (!mode) {
+            notify(
+              ctx,
+              `Interactive capture is ${state.captureInteractiveInput ? "on" : "off"}. Usage: /${EXTENSION_COMMAND} capture <on|off>`
+            );
+            return Promise.resolve();
+          }
+
+          if (mode !== "on" && mode !== "off") {
+            notify(ctx, `Usage: /${EXTENSION_COMMAND} capture <on|off>`);
+            return Promise.resolve();
+          }
+
+          state = { ...state, captureInteractiveInput: mode === "on" };
+          persistState(pi, state);
+          updateStatus(ctx, state, hasPendingAskUser());
+          notify(
+            ctx,
+            `Interactive input capture ${state.captureInteractiveInput ? "enabled" : "disabled"}.`
           );
           return Promise.resolve();
         }
@@ -447,6 +476,7 @@ function buildSessionStatusText(state: QueueState): string {
     `- Tool calls: ${state.toolCallCount}`,
     `- Warning thresholds: ${state.warningMinutes} minutes, ${state.warningToolCalls} tool calls`,
     `- Wait timeout: ${state.waitTimeoutSeconds} seconds (0 = disabled)`,
+    `- Interactive capture while busy: ${state.captureInteractiveInput ? "on" : "off"}`,
     `- Time warning emitted: ${state.warnedTime ? "yes" : "no"}`,
     `- Tool-call warning emitted: ${state.warnedToolCalls ? "yes" : "no"}`,
   ].join("\n");
@@ -538,6 +568,7 @@ function initialState(): QueueState {
   return {
     queue: [],
     fallbackResponse: DEFAULT_FALLBACK_RESPONSE,
+    captureInteractiveInput: true,
     autopilotEnabled: false,
     autopilotPrompts: [],
     autopilotIndex: 0,
@@ -564,11 +595,12 @@ function updateStatus(
   const autopilot = state.autopilotEnabled
     ? `autopilot:${state.autopilotPrompts.length}`
     : "autopilot:off";
+  const capture = state.captureInteractiveInput ? "capture:on" : "capture:off";
   const waiting = waitingForQueue ? " | waiting:input" : "";
   const session = `${formatElapsed(state)} · ${state.toolCallCount} tools`;
   ctx.ui.setStatus(
     EXTENSION_COMMAND,
-    `${EXTENSION_NAME}: ${state.queue.length} queued${waiting} | ${autopilot} | ${session}`
+    `${EXTENSION_NAME}: ${state.queue.length} queued${waiting} | ${autopilot} | ${capture} | ${session}`
   );
 }
 
@@ -590,6 +622,7 @@ function parseQueueState(value: unknown): QueueState | undefined {
   const candidate = value as {
     queue?: unknown;
     fallbackResponse?: unknown;
+    captureInteractiveInput?: unknown;
     autopilotEnabled?: unknown;
     autopilotPrompts?: unknown;
     autopilotIndex?: unknown;
@@ -610,6 +643,11 @@ function parseQueueState(value: unknown): QueueState | undefined {
   }
 
   if (typeof candidate.fallbackResponse !== "string") return undefined;
+
+  const captureInteractiveInput =
+    typeof candidate.captureInteractiveInput === "boolean"
+      ? candidate.captureInteractiveInput
+      : true;
 
   const autopilotPrompts = Array.isArray(candidate.autopilotPrompts)
     ? candidate.autopilotPrompts.filter((item): item is string => typeof item === "string")
@@ -664,6 +702,7 @@ function parseQueueState(value: unknown): QueueState | undefined {
   return {
     queue: candidate.queue,
     fallbackResponse: candidate.fallbackResponse,
+    captureInteractiveInput,
     autopilotEnabled,
     autopilotPrompts,
     autopilotIndex,

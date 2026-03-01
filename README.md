@@ -2,7 +2,7 @@
 
 Queue user feedback ahead of time and let the model consume it via an `ask_user` tool.
 
-This extension is inspired by [TaskSync](https://github.com/4regab/TaskSync)-style workflows: you preload responses, then your Copilot-like agent pulls them during long runs.
+This extension is inspired by [TaskSync](https://github.com/4regab/TaskSync)-style workflows: you preload responses, then the `github-copilot` provider can pull them during long runs.
 
 ## What it does
 
@@ -12,7 +12,8 @@ This extension is inspired by [TaskSync](https://github.com/4regab/TaskSync)-sty
 - Supports autopilot prompt cycling (1→2→3→1…)
 - Activates queue/autopilot only on provider `github-copilot`
 - Injects Copilot-only `ask_user` loop policy into the system prompt on each new run
-- While Copilot is actively running, normal interactive input is captured into queue (instead of triggering a new turn)
+- While `github-copilot` is actively running, normal interactive input is captured into queue by default (instead of triggering a new turn)
+- Interactive capture can be toggled with `/copilot-queue capture on|off` (`on` by default)
 - Tracks session elapsed time and tool-call count in status line
 - Emits session hygiene warnings at configurable thresholds (default: 120 minutes, 50 tool calls)
 - Persists state in session entries
@@ -22,7 +23,7 @@ When `ask_user` is called:
 
 1. If queue has items → returns next queued response
 2. Else if autopilot is enabled and has prompts → returns next autopilot prompt (cycling)
-3. Else in interactive UI (Copilot provider) → waits for `/copilot-queue add <message>` or `/copilot-queue done` (optionally with timeout)
+3. Else in interactive UI (`github-copilot` provider) → waits for `/copilot-queue add <message>` or `/copilot-queue done` (optionally with timeout)
 4. Else → returns fallback response (`continue` by default)
 
 When current model provider is not `github-copilot`, queue/autopilot is bypassed and `ask_user` uses manual/fallback behavior only.
@@ -116,6 +117,16 @@ You can also install a local extension file directly:
 
 This clears the queue, disables autopilot, and releases a waiting `ask_user` call with `done`.
 
+### Interactive capture while busy (`github-copilot` only)
+
+```text
+/copilot-queue capture on
+/copilot-queue capture off
+```
+
+- `on` (default): while a run is active, interactive input is queued for `ask_user`.
+- `off`: keep normal steering behavior (input is not auto-queued).
+
 ### Wait timeout (for empty queue in UI mode)
 
 ```text
@@ -158,7 +169,7 @@ This clears the queue, disables autopilot, and releases a waiting `ask_user` cal
 ## Recommended instruction snippet for your model
 
 ```text
-Use the ask_user tool whenever feedback is required. Keep calling ask_user for iterative feedback unless the user explicitly says to stop.
+When provider is github-copilot, use the ask_user tool whenever feedback is required. Keep calling ask_user for iterative feedback unless the user explicitly says to stop.
 ```
 
 ## Development

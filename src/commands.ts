@@ -6,6 +6,7 @@ export type QueueCommand =
   | { name: "clear" }
   | { name: "fallback"; value: string }
   | { name: "done" }
+  | { name: "capture"; mode: string }
   | { name: "autopilot-on" }
   | { name: "autopilot-off" }
   | { name: "autopilot-add"; value: string }
@@ -24,6 +25,7 @@ export function buildHelpText(): string {
     `/${EXTENSION_COMMAND} clear`,
     `/${EXTENSION_COMMAND} fallback <message>`,
     `/${EXTENSION_COMMAND} done`,
+    `/${EXTENSION_COMMAND} capture <on|off>`,
     `/${EXTENSION_COMMAND} autopilot on`,
     `/${EXTENSION_COMMAND} autopilot off`,
     `/${EXTENSION_COMMAND} autopilot add <message>`,
@@ -56,6 +58,8 @@ export function parseCommand(raw: string): QueueCommand {
       return { name: "fallback", value: rest };
     case "done":
       return { name: "done" };
+    case "capture":
+      return { name: "capture", mode: rest };
     case "autopilot":
       return parseAutopilot(rest);
     case "session":

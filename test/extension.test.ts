@@ -89,6 +89,36 @@ void test("interactive input during active run is queued instead of sent", async
   assert.equal(toolResult.details.source, "queue");
 });
 
+void test("capture off keeps busy interactive input in normal steering path", async () => {
+  const captured = createCaptured();
+  extension(createPi(captured));
+
+  const inputHook = captured.eventHandlers.get("input");
+  assert.ok(inputHook);
+  assert.ok(captured.commandHandler);
+  assert.ok(captured.toolExecute);
+
+  await captured.commandHandler?.("capture off", createCommandCtx());
+
+  const inputResult = inputHook?.(
+    { text: "do not queue this", source: "interactive" },
+    createInputCtx({ idle: false })
+  ) as { action: string };
+
+  assert.equal(inputResult.action, "continue");
+
+  const toolResult = (await captured.toolExecute?.(
+    "call-1",
+    {},
+    undefined,
+    undefined,
+    createToolCtx()
+  )) as { content: { type: string; text: string }[]; details: { source: string } };
+
+  assert.equal(toolResult.content[0]?.text, "continue");
+  assert.equal(toolResult.details.source, "fallback");
+});
+
 void test("copilot waits when empty and resumes when new queue item is added", async () => {
   const captured = createCaptured();
   extension(createPi(captured));
@@ -189,7 +219,7 @@ void test("session compact schedules one-time ask_user policy reinforcement", ()
   compactHook?.({}, createToolCtx());
 
   const first = contextHook?.({ messages: [] }, createToolCtx()) as
-    | { messages?: Array<{ role?: string; customType?: string; content?: string }> }
+    | { messages?: { role?: string; customType?: string; content?: string }[] }
     | undefined;
   assert.ok(first?.messages);
   assert.equal(first?.messages?.length, 1);

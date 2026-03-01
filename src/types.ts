@@ -1,6 +1,7 @@
 export interface QueueState {
   queue: string[];
   fallbackResponse: string;
+  captureInteractiveInput: boolean;
   autopilotEnabled: boolean;
   autopilotPrompts: string[];
   autopilotIndex: number;
