@@ -1,8 +1,7 @@
-export interface ExtensionState {
-  label: string;
-}
-
-export interface EchoInput {
-  message: string;
-  uppercase?: boolean;
+export interface QueueState {
+  queue: string[];
+  fallbackResponse: string;
+  autopilotEnabled: boolean;
+  autopilotPrompts: string[];
+  autopilotIndex: number;
 }

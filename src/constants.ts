@@ -1,7 +1,6 @@
-export const EXTENSION_NAME = "my-pi-extension";
-export const EXTENSION_COMMAND = "myext";
-export const TOOL_NAME = "myext_echo";
-export const STATE_ENTRY_TYPE = "myext:state";
+export const EXTENSION_NAME = "Copilot Queue";
+export const EXTENSION_COMMAND = "copilot-queue";
+export const TOOL_NAME = "ask_user";
+export const STATE_ENTRY_TYPE = "copilot-queue:state";
 
-export const DEFAULT_LABEL = "Template ready";
-export const MAX_MESSAGE_LENGTH = 500;
+export const DEFAULT_FALLBACK_RESPONSE = "continue";
