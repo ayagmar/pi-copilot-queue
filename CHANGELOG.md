@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/ayagmar/pi-copilot-queue/compare/v0.2.0...v0.2.1) (2026-03-02)
+
+### Bug Fixes
+
+* **queue:** remove reinjection and hide non-copilot status ([8fdcd0d](https://github.com/ayagmar/pi-copilot-queue/commit/8fdcd0d14eab7432884d8f6b5f57a9cb290f8dd6))
+* **types:** align provider/status context typing ([bf7b9f1](https://github.com/ayagmar/pi-copilot-queue/commit/bf7b9f1db04951f3432e7d4b460b71a7b045b806))
+
 ## [0.2.0](https://github.com/ayagmar/pi-copilot-queue/compare/v0.1.3...v0.2.0) (2026-03-01)
 
 ### Features

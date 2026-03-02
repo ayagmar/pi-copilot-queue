@@ -1,6 +1,6 @@
 {
   "name": "pi-copilot-queue",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Pi extension that queues ask_user responses for Copilot-style workflows",
   "keywords": [
     "pi-package",
