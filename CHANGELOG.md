@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/ayagmar/pi-copilot-queue/compare/v0.2.1...v0.3.0) (2026-03-13)
+
+### Features
+
+* add @mariozechner/pi-tui dependency and update .prettierignore ([2d723a8](https://github.com/ayagmar/pi-copilot-queue/commit/2d723a85c14ae5f0f369e602ac9e8ff13fe070df))
+* Preserve agent prompt in ask_user tool output ([a75defd](https://github.com/ayagmar/pi-copilot-queue/commit/a75defd3a79fd1e0d1e2dcdac016cf9df989b420))
+
 ## [0.2.1](https://github.com/ayagmar/pi-copilot-queue/compare/v0.2.0...v0.2.1) (2026-03-02)
 
 ### Bug Fixes
