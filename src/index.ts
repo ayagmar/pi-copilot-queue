@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
+import { buildHelpText, parseCommand } from "./commands.js";
 import {
   ACTIVE_PROVIDER,
   COPILOT_ASK_USER_POLICY,
@@ -13,7 +14,7 @@ import {
   STATE_ENTRY_TYPE,
   TOOL_NAME,
 } from "./constants.js";
-import { buildHelpText, parseCommand } from "./commands.js";
+import { notifyTerminal } from "./notify.js";
 import type { QueueState } from "./types.js";
 
 const DONE_RESPONSE = "done";
@@ -526,6 +527,8 @@ async function waitForQueueInput(options: {
       ctx,
       `Queue empty. Waiting for /copilot-queue add <message> or /copilot-queue done.${timeoutText}`
     );
+    // Send native terminal notification for multitasking users
+    notifyTerminal("Pi", "ask_user waiting for input");
   }
 
   return new Promise<{ value: string; source: "queue-live" | "done" | "timeout" }>((resolve) => {
