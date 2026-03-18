@@ -73,10 +73,21 @@ function runSoundHook(): void {
  * - tmux passthrough wrapper for OSC notifications
  * - Windows toast: Windows Terminal (WSL)
  * - Optional sound hook via PI_NOTIFY_SOUND_CMD
+ *
+ * Safety: degrades to no-op in non-TTY or unsupported terminals to avoid
+ * polluting logs, test output, or redirected streams with escape sequences.
  */
 export function notifyTerminal(title: string, body: string): void {
+  // Degrade gracefully in non-interactive environments (CI, tests, pipes)
+  if (!process.stdout.isTTY) {
+    return;
+  }
+
   const isIterm2 =
     process.env.TERM_PROGRAM === "iTerm.app" || Boolean(process.env.ITERM_SESSION_ID);
+  const isGhostty = process.env.TERM_PROGRAM === "ghostty";
+  const isWezTerm = process.env.TERM_PROGRAM === "WezTerm";
+  const isRxvt = typeof process.env.TERM === "string" && process.env.TERM.includes("rxvt-unicode");
 
   if (process.env.WT_SESSION) {
     notifyWindows(title, body);
@@ -84,9 +95,10 @@ export function notifyTerminal(title: string, body: string): void {
     notifyOSC99(title, body);
   } else if (isIterm2) {
     notifyOSC9(`${title}: ${body}`);
-  } else {
+  } else if (isGhostty || isWezTerm || isRxvt) {
     notifyOSC777(title, body);
   }
+  // Unsupported terminals: no-op (no fallback to avoid pollution)
 
   runSoundHook();
 }
