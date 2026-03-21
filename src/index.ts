@@ -3,8 +3,13 @@ import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { buildHelpText, parseCommand } from "./commands.js";
 import {
-  ACTIVE_PROVIDER,
+  resolveConfiguredProviders,
+  writeGlobalConfiguredProviders,
+  writeProjectConfiguredProviders,
+} from "./config.js";
+import {
   COPILOT_ASK_USER_POLICY,
+  COPILOT_ASK_USER_REMINDER_MESSAGE,
   DEFAULT_FALLBACK_RESPONSE,
   DEFAULT_WAIT_TIMEOUT_SECONDS,
   DEFAULT_WARNING_MINUTES,
@@ -17,18 +22,28 @@ import {
 import { notifyTerminal } from "./notify.js";
 import type { QueueState } from "./types.js";
 
-const DONE_RESPONSE = "done";
+const STOP_RESPONSE = "stop";
+let configuredProviders = resolveConfiguredProviders(process.cwd());
 
 export default function copilotQueueExtension(pi: ExtensionAPI) {
+  refreshConfiguredProviders();
+
   let state: QueueState = initialState();
   let pendingAskUserResolve: ((text: string) => void) | undefined;
+  let currentRunStarted = false;
+  let currentRunAskUserCallCount = 0;
 
   function hasPendingAskUser(): boolean {
     return Boolean(pendingAskUserResolve);
   }
 
-  function isCopilotProvider(ctx: Pick<ExtensionContext, "model">): boolean {
-    return ctx.model?.provider === ACTIVE_PROVIDER;
+  function isManagedProvider(ctx: Pick<ExtensionContext, "model">): boolean {
+    const provider = ctx.model?.provider;
+    if (!provider) {
+      return false;
+    }
+
+    return configuredProviders.includes(provider);
   }
 
   function resolvePendingAskUser(
@@ -51,7 +66,10 @@ export default function copilotQueueExtension(pi: ExtensionAPI) {
   function syncState(
     ctx: Pick<ExtensionContext, "sessionManager" | "hasUI" | "ui" | "model">
   ): void {
+    refreshConfiguredProviders();
     state = restoreFromContext(ctx);
+    currentRunStarted = false;
+    currentRunAskUserCallCount = 0;
     updateStatus(ctx, state, hasPendingAskUser());
   }
 
@@ -68,22 +86,40 @@ export default function copilotQueueExtension(pi: ExtensionAPI) {
   });
 
   pi.on("before_agent_start", (event, ctx) => {
-    if (!isCopilotProvider(ctx)) {
+    if (!isManagedProvider(ctx)) {
       return;
     }
 
+    currentRunStarted = true;
+    currentRunAskUserCallCount = 0;
+
     return {
+      message: {
+        customType: `${STATE_ENTRY_TYPE}:policy`,
+        content: COPILOT_ASK_USER_REMINDER_MESSAGE,
+        display: false,
+      },
       systemPrompt: `${event.systemPrompt}\n\n${COPILOT_ASK_USER_POLICY}`,
     };
   });
 
+  onBeforeProviderRequest(pi, (event, ctx) => {
+    if (!isManagedProvider(ctx)) {
+      return event.payload;
+    }
+
+    return forceRequiredToolChoice(event.payload);
+  });
+
   pi.on("tool_call", (event, ctx) => {
-    if (!isCopilotProvider(ctx)) {
+    if (!isManagedProvider(ctx)) {
       return;
     }
     if (event.toolName !== TOOL_NAME) {
       return;
     }
+
+    currentRunAskUserCallCount += 1;
 
     let nextState: QueueState = {
       ...state,
@@ -95,8 +131,40 @@ export default function copilotQueueExtension(pi: ExtensionAPI) {
     updateStatus(ctx, state, hasPendingAskUser());
   });
 
+  pi.on("agent_end", (event, ctx) => {
+    if (!isManagedProvider(ctx) || !currentRunStarted) {
+      return;
+    }
+
+    currentRunStarted = false;
+
+    const lastAssistantReply = getLastAssistantReplyText(event.messages);
+    const missedAskUser = currentRunAskUserCallCount === 0 && lastAssistantReply.length > 0;
+
+    state = {
+      ...state,
+      completedRunCount: state.completedRunCount + 1,
+      askUserRunCount: state.askUserRunCount + (currentRunAskUserCallCount > 0 ? 1 : 0),
+      missedAskUserRunCount: state.missedAskUserRunCount + (missedAskUser ? 1 : 0),
+      lastMissedAssistantReply: missedAskUser
+        ? truncateReplyPreview(lastAssistantReply)
+        : state.lastMissedAssistantReply,
+    };
+
+    persistState(pi, state);
+    updateStatus(ctx, state, hasPendingAskUser());
+
+    if (missedAskUser) {
+      notify(
+        ctx,
+        "Copilot Queue: run ended with a direct assistant reply and never called ask_user.",
+        "warning"
+      );
+    }
+  });
+
   pi.on("input", (event, ctx) => {
-    if (!isCopilotProvider(ctx)) {
+    if (!isManagedProvider(ctx)) {
       return { action: "continue" };
     }
 
@@ -118,11 +186,13 @@ export default function copilotQueueExtension(pi: ExtensionAPI) {
     }
 
     if (resolvePendingAskUser(text, ctx)) {
+      state = { ...state, stopRequested: false };
+      persistState(pi, state);
       notify(ctx, "Busy run: sent your input to waiting ask_user.");
       return { action: "handled" };
     }
 
-    state = { ...state, queue: [...state.queue, text] };
+    state = { ...state, stopRequested: false, queue: [...state.queue, text] };
     persistState(pi, state);
     updateStatus(ctx, state, hasPendingAskUser());
     notify(ctx, `Busy run: queued follow-up (#${state.queue.length}).`);
@@ -131,6 +201,7 @@ export default function copilotQueueExtension(pi: ExtensionAPI) {
 
   pi.registerCommand(EXTENSION_COMMAND, {
     description: "Queue responses for ask_user tool calls",
+    getArgumentCompletions: (prefix: string) => buildProviderArgumentCompletions(prefix),
     handler: (args, ctx) => {
       const command = parseCommand(args);
 
@@ -142,11 +213,13 @@ export default function copilotQueueExtension(pi: ExtensionAPI) {
           }
 
           if (resolvePendingAskUser(command.value, ctx)) {
+            state = { ...state, stopRequested: false };
+            persistState(pi, state);
             notify(ctx, "Delivered message to waiting ask_user.");
             return Promise.resolve();
           }
 
-          state = { ...state, queue: [...state.queue, command.value] };
+          state = { ...state, stopRequested: false, queue: [...state.queue, command.value] };
           persistState(pi, state);
           updateStatus(ctx, state, hasPendingAskUser());
           notify(ctx, `Queued (#${state.queue.length}): ${command.value}`);
@@ -171,16 +244,26 @@ export default function copilotQueueExtension(pi: ExtensionAPI) {
           return Promise.resolve();
         }
 
-        case "done": {
-          state = { ...state, queue: [], autopilotEnabled: false };
+        case "done":
+        case "stop": {
+          state = {
+            ...state,
+            queue: [],
+            stopRequested: true,
+            autopilotEnabled: false,
+          };
           persistState(pi, state);
-          const released = resolvePendingAskUser(DONE_RESPONSE, ctx);
+          const released = resolvePendingAskUser(STOP_RESPONSE, ctx);
+          if (released) {
+            state = { ...state, stopRequested: false };
+            persistState(pi, state);
+          }
           updateStatus(ctx, state, hasPendingAskUser());
           notify(
             ctx,
             released
-              ? "Released waiting ask_user with 'done'. Queue cleared and autopilot disabled."
-              : "Queue cleared and autopilot disabled."
+              ? "Released waiting ask_user with 'stop'. Queue cleared and autopilot disabled."
+              : "Stop requested. Queue cleared and autopilot disabled. The next ask_user call will receive 'stop'."
           );
           return Promise.resolve();
         }
@@ -206,6 +289,55 @@ export default function copilotQueueExtension(pi: ExtensionAPI) {
           notify(
             ctx,
             `Interactive input capture ${state.captureInteractiveInput ? "enabled" : "disabled"}.`
+          );
+          return Promise.resolve();
+        }
+
+        case "providers": {
+          refreshConfiguredProviders();
+          const raw = command.value.trim();
+          const { scope, value } = parseProviderScope(raw);
+          const mode = value.toLowerCase();
+          if (!raw || mode === "show" || mode === "list" || mode === "status") {
+            notify(ctx, buildConfiguredProvidersText());
+            return Promise.resolve();
+          }
+
+          if (mode === "off" || mode === "clear") {
+            const scopeLabel = scope === "global" ? "Global" : "Project";
+            const path =
+              scope === "global"
+                ? writeGlobalConfiguredProviders(process.cwd(), [])
+                : writeProjectConfiguredProviders(process.cwd(), []);
+            refreshConfiguredProviders();
+            updateStatus(ctx, state, hasPendingAskUser());
+            notify(ctx, `${scopeLabel} providers disabled. Saved to ${path}.`);
+            return Promise.resolve();
+          }
+
+          const values = /^set(?:\s+|$)/i.test(value)
+            ? value.replace(/^set\s*/i, "").trim()
+            : value;
+          const providers = values
+            .split(/[\s,]+/)
+            .map((item) => item.trim())
+            .filter(Boolean);
+
+          if (providers.length === 0) {
+            notify(ctx, `Usage: /${EXTENSION_COMMAND} providers [global|project] <name... | off>`);
+            return Promise.resolve();
+          }
+
+          const scopeLabel = scope === "global" ? "Global" : "Project";
+          const path =
+            scope === "global"
+              ? writeGlobalConfiguredProviders(process.cwd(), providers)
+              : writeProjectConfiguredProviders(process.cwd(), providers);
+          refreshConfiguredProviders();
+          updateStatus(ctx, state, hasPendingAskUser());
+          notify(
+            ctx,
+            `${scopeLabel} providers updated: ${providers.join(", ")}. Saved to ${path}.`
           );
           return Promise.resolve();
         }
@@ -280,6 +412,11 @@ export default function copilotQueueExtension(pi: ExtensionAPI) {
             ...state,
             sessionStartedAt: Date.now(),
             toolCallCount: 0,
+            stopRequested: false,
+            completedRunCount: 0,
+            askUserRunCount: 0,
+            missedAskUserRunCount: 0,
+            lastMissedAssistantReply: "",
             warnedTime: false,
             warnedToolCalls: false,
           };
@@ -345,8 +482,7 @@ export default function copilotQueueExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: TOOL_NAME,
     label: "Ask User (Queue-Aware)",
-    description:
-      "For github-copilot provider: returns the next queued response first, then autopilot prompts in cycle mode. If queue is empty in UI mode, waits for /copilot-queue add or /copilot-queue done.",
+    description: `For configured providers: call this instead of ending with a direct assistant reply. Returns the next queued response first, then autopilot prompts in cycle mode. If queue is empty in UI mode, waits for /copilot-queue add or /copilot-queue done.`,
     parameters: Type.Object({
       prompt: Type.Optional(
         Type.String({ description: "Question to display when queue and autopilot are empty" })
@@ -363,8 +499,18 @@ export default function copilotQueueExtension(pi: ExtensionAPI) {
       return new Text(text, 0, 0);
     },
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      if (!isCopilotProvider(ctx)) {
+      if (!isManagedProvider(ctx)) {
         return askManuallyOrFallback(params.prompt, ctx, state.fallbackResponse);
+      }
+
+      if (state.stopRequested) {
+        state = { ...state, stopRequested: false };
+        persistState(pi, state);
+        updateStatus(ctx, state, hasPendingAskUser());
+        return {
+          content: [{ type: "text", text: STOP_RESPONSE }],
+          details: { source: "stop", remaining: state.queue.length },
+        };
       }
 
       const queued = state.queue[0];
@@ -414,7 +560,7 @@ export default function copilotQueueExtension(pi: ExtensionAPI) {
       });
 
       const source =
-        text.source === "done" ? "done" : text.source === "timeout" ? "fallback" : "queue-live";
+        text.source === "stop" ? "stop" : text.source === "timeout" ? "fallback" : "queue-live";
       return {
         content: [{ type: "text", text: text.value }],
         details: { source, remaining: state.queue.length },
@@ -469,16 +615,254 @@ function parseNonNegativeInt(raw: string): number | undefined {
 
 function buildSessionStatusText(state: QueueState): string {
   const elapsed = formatElapsed(state);
+  const compliance = formatComplianceRate(state);
+  const lastMiss = state.lastMissedAssistantReply
+    ? `- Last missed direct reply: ${state.lastMissedAssistantReply}`
+    : undefined;
+
   return [
     `Session status:`,
+    `- Managed providers: ${getConfiguredProviderLabel()}`,
     `- Elapsed: ${elapsed}`,
     `- Tool calls: ${state.toolCallCount}`,
+    `- Completed managed-provider runs: ${state.completedRunCount}`,
+    `- Runs with ask_user: ${state.askUserRunCount}`,
+    `- Direct replies without ask_user: ${state.missedAskUserRunCount}`,
+    `- ask_user compliance: ${compliance}`,
     `- Warning thresholds: ${state.warningMinutes} minutes, ${state.warningToolCalls} tool calls`,
     `- Wait timeout: ${state.waitTimeoutSeconds} seconds (0 = disabled)`,
     `- Interactive capture while busy: ${state.captureInteractiveInput ? "on" : "off"}`,
+    `- Stop requested: ${state.stopRequested ? "yes" : "no"}`,
     `- Time warning emitted: ${state.warnedTime ? "yes" : "no"}`,
     `- Tool-call warning emitted: ${state.warnedToolCalls ? "yes" : "no"}`,
+    lastMiss,
+  ]
+    .filter((line): line is string => Boolean(line))
+    .join("\n");
+}
+
+function getConfiguredProviderLabel(): string {
+  return configuredProviders.length > 0 ? configuredProviders.join(", ") : "(disabled)";
+}
+
+function buildConfiguredProvidersText(): string {
+  return [
+    `Copilot Queue provider settings:`,
+    `- Active providers: ${getConfiguredProviderLabel()}`,
+    `- Set this project: /${EXTENSION_COMMAND} providers <name...>`,
+    `- Set global default: /${EXTENSION_COMMAND} providers global <name...>`,
+    `- Disable this project: /${EXTENSION_COMMAND} providers off`,
+    `- Disable global default: /${EXTENSION_COMMAND} providers global off`,
+    `- Project file: .pi/settings.json`,
+    `- Global file: ~/.pi/agent/settings.json`,
   ].join("\n");
+}
+
+function parseProviderScope(raw: string): { scope: "project" | "global"; value: string } {
+  if (/^global(?:\s+|$)/i.test(raw)) {
+    return { scope: "global", value: raw.replace(/^global\s*/i, "").trim() };
+  }
+
+  if (/^project(?:\s+|$)/i.test(raw)) {
+    return { scope: "project", value: raw.replace(/^project\s*/i, "").trim() };
+  }
+
+  return { scope: "project", value: raw };
+}
+
+function buildProviderArgumentCompletions(
+  prefix: string
+): { value: string; label: string }[] | null {
+  const trimmed = prefix.trim();
+  const suggestions = getProviderSuggestions(trimmed);
+
+  if (suggestions.length === 0) {
+    return null;
+  }
+
+  return suggestions.map((value) => ({ value, label: value }));
+}
+
+function getProviderSuggestions(prefix: string): string[] {
+  const items = ["global", "project", "show", "list", "status", "set", "off", "clear"];
+  if (!prefix) {
+    return items;
+  }
+
+  const tokens = prefix.split(/\s+/);
+  if (tokens.length === 1) {
+    return items.filter((item) => item.startsWith(tokens[0] ?? ""));
+  }
+
+  const scope = tokens[0]?.toLowerCase();
+  if (scope === "global" || scope === "project") {
+    return ["set", "off", "clear", "show", "list", "status"].filter((item) =>
+      item.startsWith(tokens[tokens.length - 1] ?? "")
+    );
+  }
+
+  return items.filter((item) => item.startsWith(tokens[tokens.length - 1] ?? ""));
+}
+
+function refreshConfiguredProviders(cwd: string = process.cwd()): void {
+  configuredProviders = resolveConfiguredProviders(cwd);
+}
+
+function formatComplianceRate(state: QueueState): string {
+  if (state.completedRunCount === 0) {
+    return "n/a (no completed runs yet)";
+  }
+
+  const percentage = (state.askUserRunCount / state.completedRunCount) * 100;
+  return `${percentage.toFixed(1)}%`;
+}
+
+function getLastAssistantReplyText(messages: unknown): string {
+  if (!Array.isArray(messages)) return "";
+
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i] as unknown;
+    if (!message || typeof message !== "object") continue;
+    if ((message as { role?: unknown }).role !== "assistant") continue;
+    return extractMessageText((message as { content?: unknown }).content);
+  }
+
+  return "";
+}
+
+function extractMessageText(content: unknown): string {
+  if (typeof content === "string") {
+    return content.trim();
+  }
+
+  if (!Array.isArray(content)) {
+    return "";
+  }
+
+  return content
+    .filter(
+      (part): part is { type: "text"; text: string } =>
+        Boolean(part) &&
+        typeof part === "object" &&
+        (part as { type?: unknown }).type === "text" &&
+        typeof (part as { text?: unknown }).text === "string"
+    )
+    .map((part) => part.text.trim())
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
+function truncateReplyPreview(text: string): string {
+  const singleLine = text.replace(/\s+/g, " ").trim();
+  if (singleLine.length <= 120) {
+    return singleLine;
+  }
+  return `${singleLine.slice(0, 117)}...`;
+}
+
+function onBeforeProviderRequest(
+  pi: ExtensionAPI,
+  handler: (event: { payload: unknown }, ctx: ExtensionContext) => unknown
+): void {
+  const extensionWithDynamicEvents = pi as ExtensionAPI & {
+    on: (event: string, eventHandler: (event: unknown, ctx: ExtensionContext) => unknown) => void;
+  };
+
+  extensionWithDynamicEvents.on("before_provider_request", (event, ctx) => {
+    if (!event || typeof event !== "object") {
+      return undefined;
+    }
+
+    if (!("payload" in event)) {
+      return undefined;
+    }
+
+    return handler(event as { payload: unknown }, ctx);
+  });
+}
+
+function forceRequiredToolChoice(payload: unknown): unknown {
+  if (!isOpenAiToolChoicePayload(payload)) {
+    return payload;
+  }
+
+  if (!payload.tools.some(isAskUserOpenAiTool)) {
+    return payload;
+  }
+
+  const currentToolChoice = payload.tool_choice;
+  if (currentToolChoice === "required") {
+    return payload;
+  }
+
+  if (currentToolChoice && typeof currentToolChoice === "object") {
+    return payload;
+  }
+
+  return {
+    ...payload,
+    tool_choice: "required",
+  };
+}
+
+function isOpenAiToolChoicePayload(payload: unknown): payload is {
+  tools: unknown[];
+  tool_choice?: unknown;
+} {
+  if (!payload || typeof payload !== "object") {
+    return false;
+  }
+
+  if (!("tools" in payload)) {
+    return false;
+  }
+
+  const tools = (payload as { tools?: unknown }).tools;
+  if (!Array.isArray(tools)) {
+    return false;
+  }
+
+  return tools.some(isOpenAiFunctionTool);
+}
+
+function isOpenAiFunctionTool(tool: unknown): boolean {
+  if (!tool || typeof tool !== "object") {
+    return false;
+  }
+
+  const candidate = tool as {
+    type?: unknown;
+    function?: unknown;
+    name?: unknown;
+  };
+
+  if (candidate.type === "function") {
+    return true;
+  }
+
+  return typeof candidate.function === "object" || typeof candidate.name === "string";
+}
+
+function isAskUserOpenAiTool(tool: unknown): boolean {
+  if (!tool || typeof tool !== "object") {
+    return false;
+  }
+
+  const candidate = tool as {
+    name?: unknown;
+    function?: unknown;
+  };
+
+  if (candidate.name === TOOL_NAME) {
+    return true;
+  }
+
+  if (!candidate.function || typeof candidate.function !== "object") {
+    return false;
+  }
+
+  return (candidate.function as { name?: unknown }).name === TOOL_NAME;
 }
 
 async function askManuallyOrFallback(
@@ -511,7 +895,7 @@ async function waitForQueueInput(options: {
   timeoutSeconds: number;
   isWaiting: () => boolean;
   markWaiting: (resolve: (text: string) => void) => void;
-}): Promise<{ value: string; source: "queue-live" | "done" | "timeout" }> {
+}): Promise<{ value: string; source: "queue-live" | "stop" | "timeout" }> {
   const { signal, ctx, fallbackResponse, timeoutSeconds, isWaiting, markWaiting } = options;
 
   if (signal?.aborted) {
@@ -525,17 +909,17 @@ async function waitForQueueInput(options: {
         : " Waiting without timeout.";
     notify(
       ctx,
-      `Queue empty. Waiting for /copilot-queue add <message> or /copilot-queue done.${timeoutText}`
+      `Queue empty. Waiting for /copilot-queue add <message>, /copilot-queue done, or /copilot-queue stop.${timeoutText}`
     );
     // Send native terminal notification for multitasking users
     notifyTerminal("Pi", "ask_user waiting for input");
   }
 
-  return new Promise<{ value: string; source: "queue-live" | "done" | "timeout" }>((resolve) => {
+  return new Promise<{ value: string; source: "queue-live" | "stop" | "timeout" }>((resolve) => {
     let settled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
-    const settle = (result: { value: string; source: "queue-live" | "done" | "timeout" }) => {
+    const settle = (result: { value: string; source: "queue-live" | "stop" | "timeout" }) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
@@ -558,7 +942,7 @@ async function waitForQueueInput(options: {
     }
 
     markWaiting((text) =>
-      settle({ value: text, source: text === DONE_RESPONSE ? "done" : "queue-live" })
+      settle({ value: text, source: text === STOP_RESPONSE ? "stop" : "queue-live" })
     );
   });
 }
@@ -568,11 +952,16 @@ function initialState(): QueueState {
     queue: [],
     fallbackResponse: DEFAULT_FALLBACK_RESPONSE,
     captureInteractiveInput: true,
+    stopRequested: false,
     autopilotEnabled: false,
     autopilotPrompts: [],
     autopilotIndex: 0,
     sessionStartedAt: Date.now(),
     toolCallCount: 0,
+    completedRunCount: 0,
+    askUserRunCount: 0,
+    missedAskUserRunCount: 0,
+    lastMissedAssistantReply: "",
     warningMinutes: DEFAULT_WARNING_MINUTES,
     warningToolCalls: DEFAULT_WARNING_TOOL_CALLS,
     waitTimeoutSeconds: DEFAULT_WAIT_TIMEOUT_SECONDS,
@@ -595,7 +984,7 @@ function updateStatus(
   waitingForQueue: boolean
 ): void {
   if (!ctx.hasUI) return;
-  if (ctx.model?.provider !== ACTIVE_PROVIDER) {
+  if (!ctx.model?.provider || !configuredProviders.includes(ctx.model.provider)) {
     ctx.ui.setStatus(EXTENSION_COMMAND);
     return;
   }
@@ -605,7 +994,8 @@ function updateStatus(
     : "autopilot:off";
   const capture = state.captureInteractiveInput ? "capture:on" : "capture:off";
   const waiting = waitingForQueue ? " | waiting:input" : "";
-  const session = `${formatElapsed(state)} · ${state.toolCallCount} tools`;
+  const misses = state.missedAskUserRunCount > 0 ? ` · miss:${state.missedAskUserRunCount}` : "";
+  const session = `${formatElapsed(state)} · ${state.toolCallCount} tools${misses}`;
   ctx.ui.setStatus(
     EXTENSION_COMMAND,
     `${EXTENSION_NAME}: ${state.queue.length} queued${waiting} | ${autopilot} | ${capture} | ${session}`
@@ -631,11 +1021,16 @@ function parseQueueState(value: unknown): QueueState | undefined {
     queue?: unknown;
     fallbackResponse?: unknown;
     captureInteractiveInput?: unknown;
+    stopRequested?: unknown;
     autopilotEnabled?: unknown;
     autopilotPrompts?: unknown;
     autopilotIndex?: unknown;
     sessionStartedAt?: unknown;
     toolCallCount?: unknown;
+    completedRunCount?: unknown;
+    askUserRunCount?: unknown;
+    missedAskUserRunCount?: unknown;
+    lastMissedAssistantReply?: unknown;
     warningMinutes?: unknown;
     warningToolCalls?: unknown;
     waitTimeoutSeconds?: unknown;
@@ -657,6 +1052,9 @@ function parseQueueState(value: unknown): QueueState | undefined {
       ? candidate.captureInteractiveInput
       : true;
 
+  const stopRequested =
+    typeof candidate.stopRequested === "boolean" ? candidate.stopRequested : false;
+
   const autopilotPrompts = Array.isArray(candidate.autopilotPrompts)
     ? candidate.autopilotPrompts.filter((item): item is string => typeof item === "string")
     : [];
@@ -675,6 +1073,28 @@ function parseQueueState(value: unknown): QueueState | undefined {
     typeof candidate.toolCallCount === "number" ? candidate.toolCallCount : 0;
   const toolCallCount =
     Number.isInteger(rawToolCallCount) && rawToolCallCount >= 0 ? rawToolCallCount : 0;
+
+  const rawCompletedRunCount =
+    typeof candidate.completedRunCount === "number" ? candidate.completedRunCount : 0;
+  const completedRunCount =
+    Number.isInteger(rawCompletedRunCount) && rawCompletedRunCount >= 0 ? rawCompletedRunCount : 0;
+
+  const rawAskUserRunCount =
+    typeof candidate.askUserRunCount === "number" ? candidate.askUserRunCount : 0;
+  const askUserRunCount =
+    Number.isInteger(rawAskUserRunCount) && rawAskUserRunCount >= 0 ? rawAskUserRunCount : 0;
+
+  const rawMissedAskUserRunCount =
+    typeof candidate.missedAskUserRunCount === "number" ? candidate.missedAskUserRunCount : 0;
+  const missedAskUserRunCount =
+    Number.isInteger(rawMissedAskUserRunCount) && rawMissedAskUserRunCount >= 0
+      ? rawMissedAskUserRunCount
+      : 0;
+
+  const lastMissedAssistantReply =
+    typeof candidate.lastMissedAssistantReply === "string"
+      ? candidate.lastMissedAssistantReply
+      : "";
 
   const rawWarningMinutes =
     typeof candidate.warningMinutes === "number"
@@ -711,11 +1131,16 @@ function parseQueueState(value: unknown): QueueState | undefined {
     queue: candidate.queue,
     fallbackResponse: candidate.fallbackResponse,
     captureInteractiveInput,
+    stopRequested,
     autopilotEnabled,
     autopilotPrompts,
     autopilotIndex,
     sessionStartedAt,
     toolCallCount,
+    completedRunCount,
+    askUserRunCount,
+    missedAskUserRunCount,
+    lastMissedAssistantReply,
     warningMinutes,
     warningToolCalls,
     waitTimeoutSeconds,
