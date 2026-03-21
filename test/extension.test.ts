@@ -57,9 +57,62 @@ void test("injects ask_user policy for github-copilot", () => {
   const result = hook?.(
     { systemPrompt: "base prompt" },
     { model: { provider: "github-copilot" } }
-  ) as { systemPrompt: string };
+  ) as { systemPrompt: string; message: { content: string } };
 
   assert.match(result.systemPrompt, /call the ask_user tool/i);
+  assert.match(result.systemPrompt, /explicitly replied with stop, end, terminate, or quit/i);
+  assert.doesNotMatch(result.systemPrompt, /no more interaction needed/i);
+  assert.match(
+    result.message.content,
+    /never stop the ask_user loop unless the user explicitly replies/i
+  );
+});
+
+void test("forces required tool choice for managed provider payloads when ask_user is present", () => {
+  const captured = createCaptured();
+  extension(createPi(captured));
+
+  const hook = captured.eventHandlers.get("before_provider_request");
+  assert.ok(hook);
+
+  const result = hook?.(
+    {
+      payload: {
+        tools: [
+          {
+            type: "function",
+            function: { name: TOOL_NAME },
+          },
+        ],
+        tool_choice: "auto",
+      },
+    },
+    { model: { provider: "github-copilot" } }
+  ) as { tool_choice: string };
+
+  assert.equal(result.tool_choice, "required");
+});
+
+void test("does not force tool choice when ask_user is absent", () => {
+  const captured = createCaptured();
+  extension(createPi(captured));
+
+  const hook = captured.eventHandlers.get("before_provider_request");
+  assert.ok(hook);
+
+  const payload = {
+    tools: [
+      {
+        type: "function",
+        function: { name: "bash" },
+      },
+    ],
+    tool_choice: "auto",
+  };
+
+  const result = hook?.({ payload }, { model: { provider: "github-copilot" } });
+
+  assert.deepEqual(result, payload);
 });
 
 void test("interactive input during active run is queued instead of sent", async () => {
@@ -142,7 +195,7 @@ void test("copilot waits when empty and resumes when new queue item is added", a
   assert.equal(waitingResult.details.source, "queue-live");
 });
 
-void test("done command releases waiting ask_user", async () => {
+void test("done command releases waiting ask_user with stop", async () => {
   const captured = createCaptured();
   extension(createPi(captured));
 
@@ -161,8 +214,51 @@ void test("done command releases waiting ask_user", async () => {
   await captured.commandHandler?.("done", createCommandCtx());
 
   const waitingResult = await waitingResultPromise;
-  assert.equal(waitingResult.content[0]?.text, "done");
-  assert.equal(waitingResult.details.source, "done");
+  assert.equal(waitingResult.content[0]?.text, "stop");
+  assert.equal(waitingResult.details.source, "stop");
+});
+
+void test("stop command makes the next ask_user return stop", async () => {
+  const captured = createCaptured();
+  extension(createPi(captured));
+
+  assert.ok(captured.commandHandler);
+  assert.ok(captured.toolExecute);
+
+  await captured.commandHandler?.("stop", createCommandCtx());
+
+  const result = (await captured.toolExecute?.(
+    "call-1",
+    {},
+    undefined,
+    undefined,
+    createToolCtx()
+  )) as { content: { type: string; text: string }[]; details: { source: string } };
+
+  assert.equal(result.content[0]?.text, "stop");
+  assert.equal(result.details.source, "stop");
+});
+
+void test("new queued input clears a pending stop request", async () => {
+  const captured = createCaptured();
+  extension(createPi(captured));
+
+  assert.ok(captured.commandHandler);
+  assert.ok(captured.toolExecute);
+
+  await captured.commandHandler?.("stop", createCommandCtx());
+  await captured.commandHandler?.("add continue instead", createCommandCtx());
+
+  const result = (await captured.toolExecute?.(
+    "call-1",
+    {},
+    undefined,
+    undefined,
+    createToolCtx()
+  )) as { content: { type: string; text: string }[]; details: { source: string } };
+
+  assert.equal(result.content[0]?.text, "continue instead");
+  assert.equal(result.details.source, "queue");
 });
 
 void test("wait timeout returns fallback when no queued input arrives", async () => {
@@ -224,8 +320,80 @@ void test("session status and reset commands work", async () => {
   await captured.commandHandler?.("session reset", createCommandCtx(notifications, true));
   const lastState = captured.entries[captured.entries.length - 1]?.data as {
     toolCallCount: number;
+    completedRunCount: number;
+    missedAskUserRunCount: number;
   };
   assert.equal(lastState.toolCallCount, 0);
+  assert.equal(lastState.completedRunCount, 0);
+  assert.equal(lastState.missedAskUserRunCount, 0);
+});
+
+void test("tracks missed ask_user runs when copilot replies directly", async () => {
+  const captured = createCaptured();
+  extension(createPi(captured));
+
+  const notifications: string[] = [];
+  const beforeAgentStartHook = captured.eventHandlers.get("before_agent_start");
+  const agentEndHook = captured.eventHandlers.get("agent_end");
+
+  assert.ok(captured.commandHandler);
+  assert.ok(beforeAgentStartHook);
+  assert.ok(agentEndHook);
+
+  beforeAgentStartHook?.({ systemPrompt: "base prompt" }, createToolCtx({ hasUI: true }));
+  agentEndHook?.(
+    {
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "Here is a direct answer instead of ask_user." }],
+        },
+      ],
+    },
+    createToolCtx({ hasUI: true, notifications })
+  );
+
+  await captured.commandHandler?.("session status", createCommandCtx(notifications, true));
+
+  assert.ok(notifications.some((line) => line.includes("Direct replies without ask_user: 1")));
+  assert.ok(
+    notifications.some((line) => line.includes("Last missed direct reply: Here is a direct answer"))
+  );
+});
+
+void test("tracks successful runs that used ask_user", async () => {
+  const captured = createCaptured();
+  extension(createPi(captured));
+
+  const notifications: string[] = [];
+  const beforeAgentStartHook = captured.eventHandlers.get("before_agent_start");
+  const toolCallHook = captured.eventHandlers.get("tool_call");
+  const agentEndHook = captured.eventHandlers.get("agent_end");
+
+  assert.ok(captured.commandHandler);
+  assert.ok(beforeAgentStartHook);
+  assert.ok(toolCallHook);
+  assert.ok(agentEndHook);
+
+  beforeAgentStartHook?.({ systemPrompt: "base prompt" }, createToolCtx());
+  toolCallHook?.({ toolName: TOOL_NAME }, createToolCtx());
+  agentEndHook?.(
+    {
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "Applied the feedback and kept going." }],
+        },
+      ],
+    },
+    createToolCtx()
+  );
+
+  await captured.commandHandler?.("session status", createCommandCtx(notifications, true));
+
+  assert.ok(notifications.some((line) => line.includes("Completed managed-provider runs: 1")));
+  assert.ok(notifications.some((line) => line.includes("Runs with ask_user: 1")));
+  assert.ok(notifications.some((line) => line.includes("Direct replies without ask_user: 0")));
 });
 
 void test("tool-call warning fires at configurable threshold", async () => {
