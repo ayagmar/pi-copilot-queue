@@ -102,7 +102,7 @@ You can also install a local extension file directly:
 
 By default, Copilot Queue is active only for `github-copilot`.
 
-You can override that in Pi settings:
+You can override that in `~/.pi/agent/settings.json`:
 
 ```json
 {
@@ -123,11 +123,12 @@ Single-provider shorthand also works:
 }
 ```
 
-Settings lookup order:
+Settings are global and are read from `~/.pi/agent/settings.json`.
 
-- `.pi/settings.json` overrides
-- `~/.pi/agent/settings.json`
-- defaults: `providers = ["github-copilot"]`, `showStatusLine = true`
+Defaults:
+
+- `providers = ["github-copilot"]`
+- `showStatusLine = true`
 
 Use an empty array to disable provider interception entirely:
 
@@ -149,7 +150,7 @@ Hide the extension status line while keeping provider management enabled:
 }
 ```
 
-You can also manage the project or global override from inside Pi:
+You can also manage the global settings from inside Pi:
 
 ```text
 /copilot-queue providers
@@ -161,9 +162,9 @@ You can also manage the project or global override from inside Pi:
 ```
 
 - `providers` with no arguments shows the current active list.
-- Passing one or more provider names writes `.pi/settings.json` for the current project.
-- Prefixing with `global` writes `~/.pi/agent/settings.json` instead.
-- `off` writes an empty provider list for the selected scope.
+- Passing one or more provider names writes `~/.pi/agent/settings.json`.
+- `global` is still accepted as an alias.
+- `off` writes an empty global provider list.
 - Tab completion covers the full command surface, including top-level commands, provider routing, session subcommands, timeout presets, and common provider names.
 
 ## Usage
@@ -266,6 +267,14 @@ When provider is managed by Copilot Queue, use the ask_user tool whenever feedba
 ```bash
 pnpm install
 pnpm run check
+```
+
+Release commands:
+
+```bash
+pnpm run release:patch
+pnpm run release:minor
+pnpm run release:major
 ```
 
 Quick run:

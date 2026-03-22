@@ -75,7 +75,7 @@ void test("command completions include descriptive top-level suggestions", () =>
   assert.ok(completions.some((item) => item.label.includes("open Copilot Queue settings")));
 });
 
-void test("command completions include provider suggestions", () => {
+void test("command completions include global provider suggestions", () => {
   const completions = buildCommandArgumentCompletions("providers g", {
     configuredProviders: ["github-copilot"],
   });
@@ -85,13 +85,12 @@ void test("command completions include provider suggestions", () => {
   assert.ok(completions.some((item) => item.value === "providers global "));
 });
 
-void test("command completions include scoped provider examples", () => {
+void test("command completions do not suggest project-scoped provider examples", () => {
   const completions = buildCommandArgumentCompletions("providers project g", {
     configuredProviders: ["github-copilot"],
   });
 
-  assert.ok(completions);
-  assert.ok(completions.some((item) => item.value === "providers project github-copilot"));
+  assert.equal(completions, null);
 });
 
 void test("command completions stay out of freeform arguments", () => {
@@ -107,7 +106,7 @@ void test("help includes key commands", () => {
   assert.match(help, /copilot-queue done/);
   assert.match(help, /copilot-queue stop/);
   assert.match(help, /copilot-queue capture/);
-  assert.match(help, /copilot-queue providers/);
+  assert.match(help, /copilot-queue providers <name... \| off>/);
   assert.match(help, /copilot-queue settings/);
   assert.match(help, /copilot-queue autopilot on/);
   assert.match(help, /copilot-queue session reset/);

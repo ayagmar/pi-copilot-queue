@@ -24,11 +24,3 @@ export const COPILOT_ASK_USER_POLICY = [
   "- Do not act like the conversation is finished.",
   "- Do not wait passively for the user without calling ask_user.",
 ].join("\n");
-
-export const COPILOT_ASK_USER_REMINDER_MESSAGE = [
-  "Copilot Queue protocol reminder:",
-  "- Use ask_user instead of ending with a direct assistant reply.",
-  "- If you need confirmation, clarification, or the next instruction, call ask_user.",
-  "- After every completed step, call ask_user again.",
-  "- Never stop the ask_user loop unless the user explicitly replies with stop, end, terminate, or quit.",
-].join("\n");

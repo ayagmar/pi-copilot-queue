@@ -18,6 +18,9 @@ build/
 *.swo
 *~
 
+# Pi local settings
+.pi/
+
 # OS
 .DS_Store
 Thumbs.db

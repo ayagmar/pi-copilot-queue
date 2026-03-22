@@ -25,6 +25,9 @@
     "test": "node --import=tsx --test ./test/*.test.ts",
     "check": "tsc --noEmit -p tsconfig.json && node --import=tsx ./scripts/smoke-test.mjs && node --import=tsx --test ./test/*.test.ts && eslint . --max-warnings=0 && prettier --check .",
     "release": "release-it",
+    "release:patch": "release-it patch",
+    "release:minor": "release-it minor",
+    "release:major": "release-it major",
     "release:first": "release-it --first-release"
   },
   "pi": {

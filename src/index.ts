@@ -5,12 +5,10 @@ import { buildCommandArgumentCompletions, buildHelpText, parseCommand } from "./
 import {
   resolveCopilotQueueSettings,
   writeGlobalConfiguredProviders,
-  writeProjectConfiguredProviders,
   writeShowStatusLine,
 } from "./config.js";
 import {
   COPILOT_ASK_USER_POLICY,
-  COPILOT_ASK_USER_REMINDER_MESSAGE,
   DEFAULT_FALLBACK_RESPONSE,
   DEFAULT_WAIT_TIMEOUT_SECONDS,
   DEFAULT_WARNING_MINUTES,
@@ -72,10 +70,11 @@ export default function copilotQueueExtension(pi: ExtensionAPI) {
     ctx: Pick<ExtensionContext, "sessionManager" | "hasUI" | "ui" | "model">
   ): void {
     refreshConfiguration();
+    pendingAskUserResolve = undefined;
     state = restoreFromContext(ctx);
     currentRunStarted = false;
     currentRunAskUserCallCount = 0;
-    updateStatus(ctx, state, hasPendingAskUser());
+    updateStatus(ctx, state, false);
   }
 
   pi.on("session_start", (_event, ctx) => syncState(ctx));
@@ -99,21 +98,8 @@ export default function copilotQueueExtension(pi: ExtensionAPI) {
     currentRunAskUserCallCount = 0;
 
     return {
-      message: {
-        customType: `${STATE_ENTRY_TYPE}:policy`,
-        content: COPILOT_ASK_USER_REMINDER_MESSAGE,
-        display: false,
-      },
       systemPrompt: `${event.systemPrompt}\n\n${COPILOT_ASK_USER_POLICY}`,
     };
-  });
-
-  onBeforeProviderRequest(pi, (event, ctx) => {
-    if (!isManagedProvider(ctx)) {
-      return event.payload;
-    }
-
-    return forceRequiredToolChoice(event.payload);
   });
 
   pi.on("tool_call", (event, ctx) => {
@@ -301,7 +287,15 @@ export default function copilotQueueExtension(pi: ExtensionAPI) {
         case "providers": {
           refreshConfiguration();
           const raw = command.value.trim();
-          const { scope, value } = parseProviderScope(raw);
+          if (/^project(?:\s+|$)/i.test(raw)) {
+            notify(
+              ctx,
+              `Project-scoped providers are no longer supported. Usage: /${EXTENSION_COMMAND} providers <name... | off>`
+            );
+            return Promise.resolve();
+          }
+
+          const value = stripGlobalProviderPrefix(raw);
           const mode = value.toLowerCase();
           if (!raw || mode === "show" || mode === "list" || mode === "status") {
             notify(ctx, buildConfiguredProvidersText());
@@ -309,14 +303,10 @@ export default function copilotQueueExtension(pi: ExtensionAPI) {
           }
 
           if (mode === "off" || mode === "clear") {
-            const scopeLabel = scope === "global" ? "Global" : "Project";
-            const path =
-              scope === "global"
-                ? writeGlobalConfiguredProviders(process.cwd(), [])
-                : writeProjectConfiguredProviders(process.cwd(), []);
+            const path = writeGlobalConfiguredProviders([]);
             refreshConfiguration();
             updateStatus(ctx, state, hasPendingAskUser());
-            notify(ctx, `${scopeLabel} providers disabled. Saved to ${path}.`);
+            notify(ctx, `Global providers disabled. Saved to ${path}.`);
             return Promise.resolve();
           }
 
@@ -329,21 +319,14 @@ export default function copilotQueueExtension(pi: ExtensionAPI) {
             .filter(Boolean);
 
           if (providers.length === 0) {
-            notify(ctx, `Usage: /${EXTENSION_COMMAND} providers [global|project] <name... | off>`);
+            notify(ctx, `Usage: /${EXTENSION_COMMAND} providers <name... | off>`);
             return Promise.resolve();
           }
 
-          const scopeLabel = scope === "global" ? "Global" : "Project";
-          const path =
-            scope === "global"
-              ? writeGlobalConfiguredProviders(process.cwd(), providers)
-              : writeProjectConfiguredProviders(process.cwd(), providers);
+          const path = writeGlobalConfiguredProviders(providers);
           refreshConfiguration();
           updateStatus(ctx, state, hasPendingAskUser());
-          notify(
-            ctx,
-            `${scopeLabel} providers updated: ${providers.join(", ")}. Saved to ${path}.`
-          );
+          notify(ctx, `Global providers updated: ${providers.join(", ")}. Saved to ${path}.`);
           return Promise.resolve();
         }
 
@@ -377,22 +360,18 @@ export default function copilotQueueExtension(pi: ExtensionAPI) {
               notify(ctx, `Interactive input capture ${enabled ? "enabled" : "disabled"}.`);
             },
             onShowStatusLineChange: (enabled) => {
-              writeShowStatusLine(process.cwd(), enabled);
+              writeShowStatusLine(enabled);
               refreshConfiguration();
               updateStatus(ctx, state, hasPendingAskUser());
-              notify(ctx, `Status line ${enabled ? "enabled" : "disabled"}.`);
+              notify(ctx, `Global status line ${enabled ? "enabled" : "disabled"}.`);
             },
-            onProvidersChange: (scope, providers) => {
-              if (scope === "global") {
-                writeGlobalConfiguredProviders(process.cwd(), providers);
-              } else {
-                writeProjectConfiguredProviders(process.cwd(), providers);
-              }
+            onProvidersChange: (providers) => {
+              writeGlobalConfiguredProviders(providers);
               refreshConfiguration();
               updateStatus(ctx, state, hasPendingAskUser());
               notify(
                 ctx,
-                `${scope === "global" ? "Global" : "Project"} providers ${providers.length > 0 ? providers.join(", ") : "disabled"}.`
+                `Global providers ${providers.length > 0 ? providers.join(", ") : "disabled"}.`
               );
             },
             onWaitTimeoutChange: (seconds) => {
@@ -742,25 +721,18 @@ function buildConfiguredProvidersText(): string {
   return [
     `Copilot Queue provider settings:`,
     `- Active providers: ${getConfiguredProviderLabel()}`,
-    `- Set this project: /${EXTENSION_COMMAND} providers <name...>`,
-    `- Set global default: /${EXTENSION_COMMAND} providers global <name...>`,
-    `- Disable this project: /${EXTENSION_COMMAND} providers off`,
-    `- Disable global default: /${EXTENSION_COMMAND} providers global off`,
-    `- Project file: .pi/settings.json`,
+    `- Set global providers: /${EXTENSION_COMMAND} providers <name...>`,
+    `- Disable global providers: /${EXTENSION_COMMAND} providers off`,
     `- Global file: ~/.pi/agent/settings.json`,
   ].join("\n");
 }
 
-function parseProviderScope(raw: string): { scope: "project" | "global"; value: string } {
+function stripGlobalProviderPrefix(raw: string): string {
   if (/^global(?:\s+|$)/i.test(raw)) {
-    return { scope: "global", value: raw.replace(/^global\s*/i, "").trim() };
+    return raw.replace(/^global\s*/i, "").trim();
   }
 
-  if (/^project(?:\s+|$)/i.test(raw)) {
-    return { scope: "project", value: raw.replace(/^project\s*/i, "").trim() };
-  }
-
-  return { scope: "project", value: raw };
+  return raw;
 }
 
 function buildSettingsSummaryText(state: QueueState): string {
@@ -788,7 +760,7 @@ async function openSettingsUi(
     getConfiguredProviders: () => string[];
     onCaptureChange: (enabled: boolean) => void;
     onShowStatusLineChange: (enabled: boolean) => void;
-    onProvidersChange: (scope: "project" | "global", providers: string[]) => void;
+    onProvidersChange: (providers: string[]) => void;
     onWaitTimeoutChange: (seconds: number) => void;
     onFallbackChange: (fallbackResponse: string) => void;
     onWarningThresholdChange: (warningMinutes: number, warningToolCalls: number) => void;
@@ -886,12 +858,10 @@ async function editProvidersSetting(
   ctx: ExtensionContext,
   options: {
     getConfiguredProviders: () => string[];
-    onProvidersChange: (scope: "project" | "global", providers: string[]) => void;
+    onProvidersChange: (providers: string[]) => void;
   }
 ): Promise<void> {
   const selection = await ctx.ui.select("Managed providers", [
-    "Set project providers",
-    "Disable project providers",
     "Set global providers",
     "Disable global providers",
     "Back",
@@ -901,19 +871,13 @@ async function editProvidersSetting(
     return;
   }
 
-  if (selection === "Disable project providers") {
-    options.onProvidersChange("project", []);
-    return;
-  }
-
   if (selection === "Disable global providers") {
-    options.onProvidersChange("global", []);
+    options.onProvidersChange([]);
     return;
   }
 
-  const scope = selection === "Set global providers" ? "global" : "project";
   const response = await ctx.ui.input(
-    scope === "global" ? "Global managed providers" : "Project managed providers",
+    "Global managed providers",
     `Space- or comma-separated provider names. Active: ${options.getConfiguredProviders().join(", ") || "(disabled)"}`
   );
 
@@ -935,7 +899,7 @@ async function editProvidersSetting(
     return;
   }
 
-  options.onProvidersChange(scope, providers);
+  options.onProvidersChange(providers);
 }
 
 async function selectOnOff(
@@ -1100,8 +1064,8 @@ function formatWaitTimeoutLabel(seconds: number): string {
   return seconds === 0 ? "off" : `${seconds}s`;
 }
 
-function refreshConfiguration(cwd: string = process.cwd()): void {
-  const settings = resolveCopilotQueueSettings(cwd);
+function refreshConfiguration(): void {
+  const settings = resolveCopilotQueueSettings();
   configuredProviders = settings.providers;
   showStatusLine = settings.showStatusLine;
 }
@@ -1157,110 +1121,6 @@ function truncateReplyPreview(text: string): string {
     return singleLine;
   }
   return `${singleLine.slice(0, 117)}...`;
-}
-
-function onBeforeProviderRequest(
-  pi: ExtensionAPI,
-  handler: (event: { payload: unknown }, ctx: ExtensionContext) => unknown
-): void {
-  const extensionWithDynamicEvents = pi as ExtensionAPI & {
-    on: (event: string, eventHandler: (event: unknown, ctx: ExtensionContext) => unknown) => void;
-  };
-
-  extensionWithDynamicEvents.on("before_provider_request", (event, ctx) => {
-    if (!event || typeof event !== "object") {
-      return undefined;
-    }
-
-    if (!("payload" in event)) {
-      return undefined;
-    }
-
-    return handler(event as { payload: unknown }, ctx);
-  });
-}
-
-function forceRequiredToolChoice(payload: unknown): unknown {
-  if (!isOpenAiToolChoicePayload(payload)) {
-    return payload;
-  }
-
-  if (!payload.tools.some(isAskUserOpenAiTool)) {
-    return payload;
-  }
-
-  const currentToolChoice = payload.tool_choice;
-  if (currentToolChoice === "required") {
-    return payload;
-  }
-
-  if (currentToolChoice && typeof currentToolChoice === "object") {
-    return payload;
-  }
-
-  return {
-    ...payload,
-    tool_choice: "required",
-  };
-}
-
-function isOpenAiToolChoicePayload(payload: unknown): payload is {
-  tools: unknown[];
-  tool_choice?: unknown;
-} {
-  if (!payload || typeof payload !== "object") {
-    return false;
-  }
-
-  if (!("tools" in payload)) {
-    return false;
-  }
-
-  const tools = (payload as { tools?: unknown }).tools;
-  if (!Array.isArray(tools)) {
-    return false;
-  }
-
-  return tools.some(isOpenAiFunctionTool);
-}
-
-function isOpenAiFunctionTool(tool: unknown): boolean {
-  if (!tool || typeof tool !== "object") {
-    return false;
-  }
-
-  const candidate = tool as {
-    type?: unknown;
-    function?: unknown;
-    name?: unknown;
-  };
-
-  if (candidate.type === "function") {
-    return true;
-  }
-
-  return typeof candidate.function === "object" || typeof candidate.name === "string";
-}
-
-function isAskUserOpenAiTool(tool: unknown): boolean {
-  if (!tool || typeof tool !== "object") {
-    return false;
-  }
-
-  const candidate = tool as {
-    name?: unknown;
-    function?: unknown;
-  };
-
-  if (candidate.name === TOOL_NAME) {
-    return true;
-  }
-
-  if (!candidate.function || typeof candidate.function !== "object") {
-    return false;
-  }
-
-  return (candidate.function as { name?: unknown }).name === TOOL_NAME;
 }
 
 async function askManuallyOrFallback(

@@ -57,7 +57,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           if [ "${{ inputs.first_release }}" = "true" ]; then
-            pnpm exec release-it --ci --first-release --${{ inputs.release_type }}
+            pnpm exec release-it --ci --first-release --increment "${{ inputs.release_type }}"
           else
-            pnpm exec release-it --ci --${{ inputs.release_type }}
+            pnpm exec release-it --ci --increment "${{ inputs.release_type }}"
           fi

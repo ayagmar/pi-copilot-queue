@@ -71,7 +71,7 @@ export function buildHelpText(): string {
     `/${EXTENSION_COMMAND} done`,
     `/${EXTENSION_COMMAND} stop`,
     `/${EXTENSION_COMMAND} capture <on|off>`,
-    `/${EXTENSION_COMMAND} providers [global|project] <name... | off>`,
+    `/${EXTENSION_COMMAND} providers <name... | off>`,
     `/${EXTENSION_COMMAND} settings`,
     `/${EXTENSION_COMMAND} autopilot on`,
     `/${EXTENSION_COMMAND} autopilot off`,
@@ -209,19 +209,11 @@ function buildProviderCompletions(configuredProviders: string[]): CommandComplet
   const providerSetExamples = providerNames.flatMap((provider) => [
     {
       value: `providers ${provider}`,
-      label: `providers ${provider} — set project managed providers`,
+      label: `providers ${provider} — set global managed providers`,
     },
     {
       value: `providers set ${provider}`,
-      label: `providers set ${provider} — set project managed providers`,
-    },
-    {
-      value: `providers project ${provider}`,
-      label: `providers project ${provider} — set project managed providers`,
-    },
-    {
-      value: `providers project set ${provider}`,
-      label: `providers project set ${provider} — set project managed providers`,
+      label: `providers set ${provider} — set global managed providers`,
     },
     {
       value: `providers global ${provider}`,
@@ -238,18 +230,9 @@ function buildProviderCompletions(configuredProviders: string[]): CommandComplet
     { value: "providers show", label: "providers show — show managed providers" },
     { value: "providers list", label: "providers list — show managed providers" },
     { value: "providers status", label: "providers status — show managed providers" },
-    { value: "providers off", label: "providers off — disable project provider routing" },
-    { value: "providers clear", label: "providers clear — disable project provider routing" },
-    { value: "providers set ", label: "providers set <name...> — set project managed providers" },
-    { value: "providers project ", label: "providers project — project provider commands" },
-    {
-      value: "providers project off",
-      label: "providers project off — disable project provider routing",
-    },
-    {
-      value: "providers project set ",
-      label: "providers project set <name...> — set project managed providers",
-    },
+    { value: "providers off", label: "providers off — disable global provider routing" },
+    { value: "providers clear", label: "providers clear — disable global provider routing" },
+    { value: "providers set ", label: "providers set <name...> — set global managed providers" },
     { value: "providers global ", label: "providers global — global provider commands" },
     {
       value: "providers global off",

@@ -21,28 +21,22 @@ export interface ResolvedCopilotQueueSettings {
 }
 
 export function resolveCopilotQueueSettings(
-  cwd: string,
   homeDir: string = homedir()
 ): ResolvedCopilotQueueSettings {
-  const globalSettings = readSettingsFile(join(homeDir, ".pi", "agent", "settings.json"));
-  const projectSettings = readSettingsFile(join(cwd, ".pi", "settings.json"));
+  const globalSettings = readSettingsFile(getGlobalSettingsPath(homeDir));
 
   return {
-    providers: readProviderOverride(projectSettings) ??
-      readProviderOverride(globalSettings) ?? [...DEFAULT_ACTIVE_PROVIDERS],
-    showStatusLine:
-      readShowStatusLineOverride(projectSettings) ??
-      readShowStatusLineOverride(globalSettings) ??
-      DEFAULT_SHOW_STATUS_LINE,
+    providers: readProviderOverride(globalSettings) ?? [...DEFAULT_ACTIVE_PROVIDERS],
+    showStatusLine: readShowStatusLineOverride(globalSettings) ?? DEFAULT_SHOW_STATUS_LINE,
   };
 }
 
-export function resolveConfiguredProviders(cwd: string, homeDir: string = homedir()): string[] {
-  return resolveCopilotQueueSettings(cwd, homeDir).providers;
+export function resolveConfiguredProviders(homeDir: string = homedir()): string[] {
+  return resolveCopilotQueueSettings(homeDir).providers;
 }
 
-export function resolveShowStatusLine(cwd: string, homeDir: string = homedir()): boolean {
-  return resolveCopilotQueueSettings(cwd, homeDir).showStatusLine;
+export function resolveShowStatusLine(homeDir: string = homedir()): boolean {
+  return resolveCopilotQueueSettings(homeDir).showStatusLine;
 }
 
 function readSettingsFile(path: string): PiSettingsFile | undefined {
@@ -94,16 +88,11 @@ function readShowStatusLineOverride(settings: PiSettingsFile | undefined): boole
   return config.showStatusLine;
 }
 
-export function writeConfiguredProviders(
-  cwd: string,
+export function writeGlobalConfiguredProviders(
   providers: string[],
-  scope: "project" | "global" = "project",
   homeDir: string = homedir()
 ): string {
-  const path =
-    scope === "global"
-      ? join(homeDir, ".pi", "agent", "settings.json")
-      : join(cwd, ".pi", "settings.json");
+  const path = getGlobalSettingsPath(homeDir);
   const existing = readSettingsFile(path);
   const nextProviders = normalizeProviders(providers) ?? [];
   const nextQueue: CopilotQueueSettings =
@@ -122,28 +111,11 @@ export function writeConfiguredProviders(
   return path;
 }
 
-export function writeProjectConfiguredProviders(cwd: string, providers: string[]): string {
-  return writeConfiguredProviders(cwd, providers, "project");
-}
-
-export function writeGlobalConfiguredProviders(
-  cwd: string,
-  providers: string[],
-  homeDir: string = homedir()
-): string {
-  return writeConfiguredProviders(cwd, providers, "global", homeDir);
-}
-
 export function writeShowStatusLine(
-  cwd: string,
   nextShowStatusLine: boolean,
-  scope: "project" | "global" = "project",
   homeDir: string = homedir()
 ): string {
-  const path =
-    scope === "global"
-      ? join(homeDir, ".pi", "agent", "settings.json")
-      : join(cwd, ".pi", "settings.json");
+  const path = getGlobalSettingsPath(homeDir);
   const existing = readSettingsFile(path);
   const nextQueue: CopilotQueueSettings =
     existing?.copilotQueue && typeof existing.copilotQueue === "object"
@@ -158,6 +130,10 @@ export function writeShowStatusLine(
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, `${JSON.stringify(nextSettings, null, 2)}\n`, "utf8");
   return path;
+}
+
+function getGlobalSettingsPath(homeDir: string): string {
+  return join(homeDir, ".pi", "agent", "settings.json");
 }
 
 function normalizeProviders(value: unknown): string[] | undefined {

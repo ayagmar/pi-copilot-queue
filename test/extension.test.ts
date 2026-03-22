@@ -78,7 +78,7 @@ void test("provides top-level and nested command completions", () => {
   assert.ok(nested.some((item) => item.value === "providers global off"));
 });
 
-void test("injects ask_user policy for github-copilot", () => {
+void test("injects ask_user policy into the system prompt without a hidden reminder", () => {
   const captured = createCaptured();
   extension(createPi(captured));
 
@@ -88,62 +88,21 @@ void test("injects ask_user policy for github-copilot", () => {
   const result = hook?.(
     { systemPrompt: "base prompt" },
     { model: { provider: "github-copilot" } }
-  ) as { systemPrompt: string; message: { content: string } };
+  ) as { systemPrompt: string; message?: { content: string } };
 
   assert.match(result.systemPrompt, /call the ask_user tool/i);
   assert.match(result.systemPrompt, /explicitly replied with stop, end, terminate, or quit/i);
   assert.doesNotMatch(result.systemPrompt, /no more interaction needed/i);
-  assert.match(
-    result.message.content,
-    /never stop the ask_user loop unless the user explicitly replies/i
-  );
+  assert.equal(result.message, undefined);
 });
 
-void test("forces required tool choice for managed provider payloads when ask_user is present", () => {
+void test("does not register a before_provider_request hook", () => {
   const captured = createCaptured();
   extension(createPi(captured));
 
   const hook = captured.eventHandlers.get("before_provider_request");
-  assert.ok(hook);
 
-  const result = hook?.(
-    {
-      payload: {
-        tools: [
-          {
-            type: "function",
-            function: { name: TOOL_NAME },
-          },
-        ],
-        tool_choice: "auto",
-      },
-    },
-    { model: { provider: "github-copilot" } }
-  ) as { tool_choice: string };
-
-  assert.equal(result.tool_choice, "required");
-});
-
-void test("does not force tool choice when ask_user is absent", () => {
-  const captured = createCaptured();
-  extension(createPi(captured));
-
-  const hook = captured.eventHandlers.get("before_provider_request");
-  assert.ok(hook);
-
-  const payload = {
-    tools: [
-      {
-        type: "function",
-        function: { name: "bash" },
-      },
-    ],
-    tool_choice: "auto",
-  };
-
-  const result = hook?.({ payload }, { model: { provider: "github-copilot" } });
-
-  assert.deepEqual(result, payload);
+  assert.equal(hook, undefined);
 });
 
 void test("interactive input during active run is queued instead of sent", async () => {
@@ -224,6 +183,49 @@ void test("copilot waits when empty and resumes when new queue item is added", a
   const waitingResult = await waitingResultPromise;
   assert.equal(waitingResult.content[0]?.text, "continue with final polish");
   assert.equal(waitingResult.details.source, "queue-live");
+});
+
+void test("session switch clears stale waiting ask_user state", async () => {
+  const captured = createCaptured();
+  extension(createPi(captured));
+
+  const sessionSwitchHook = captured.eventHandlers.get("session_switch");
+  const notifications: string[] = [];
+  const abortController = new AbortController();
+
+  assert.ok(captured.commandHandler);
+  assert.ok(captured.toolExecute);
+  assert.ok(sessionSwitchHook);
+
+  const waitingResultPromise = captured.toolExecute?.(
+    "call-1",
+    { prompt: "Need your next instruction" },
+    abortController.signal,
+    undefined,
+    createToolCtx({ hasUI: true })
+  ) as Promise<{ content: { type: string; text: string }[]; details: { source: string } }>;
+
+  await Promise.resolve();
+  sessionSwitchHook?.({}, createSessionCtx());
+  await captured.commandHandler?.(
+    "add continue after switch",
+    createCommandCtx(notifications, true)
+  );
+
+  const queuedResult = (await captured.toolExecute?.(
+    "call-2",
+    {},
+    undefined,
+    undefined,
+    createToolCtx()
+  )) as { content: { type: string; text: string }[]; details: { source: string } };
+
+  abortController.abort();
+  await waitingResultPromise;
+
+  assert.ok(notifications.some((line) => line.includes("Queued (#1): continue after switch")));
+  assert.equal(queuedResult.content[0]?.text, "continue after switch");
+  assert.equal(queuedResult.details.source, "queue");
 });
 
 void test("done command releases waiting ask_user with stop", async () => {
@@ -691,16 +693,19 @@ void test("status line is cleared when model switches away from github-copilot",
 
 void test("status line stays hidden when showStatusLine is false", async () => {
   const previousCwd = process.cwd();
+  const previousHome = process.env.HOME;
   const cwd = createTempDir();
+  const homeDir = createTempDir();
 
   try {
-    writeJson(join(cwd, ".pi", "settings.json"), {
+    writeJson(join(homeDir, ".pi", "agent", "settings.json"), {
       copilotQueue: {
         providers: ["github-copilot"],
         showStatusLine: false,
       },
     });
     process.chdir(cwd);
+    process.env.HOME = homeDir;
 
     const captured = createCaptured();
     extension(createPi(captured));
@@ -719,7 +724,13 @@ void test("status line stays hidden when showStatusLine is false", async () => {
     assert.equal(lastStatus?.text, undefined);
   } finally {
     process.chdir(previousCwd);
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
     rmSync(cwd, { recursive: true, force: true });
+    rmSync(homeDir, { recursive: true, force: true });
   }
 });
 
@@ -775,12 +786,15 @@ void test("settings command reports a summary without UI", async () => {
   }
 });
 
-void test("settings UI can update project providers", async () => {
+void test("settings UI can update global providers", async () => {
   const previousCwd = process.cwd();
+  const previousHome = process.env.HOME;
   const cwd = createTempDir();
+  const homeDir = createTempDir();
 
   try {
     process.chdir(cwd);
+    process.env.HOME = homeDir;
 
     const captured = createCaptured();
     extension(createPi(captured));
@@ -790,19 +804,25 @@ void test("settings UI can update project providers", async () => {
     await captured.commandHandler?.(
       "settings",
       createCommandCtx(undefined, true, "github-copilot", undefined, {
-        select: ["Managed providers: github-copilot", "Set project providers", "Close"],
+        select: ["Managed providers: github-copilot", "Set global providers", "Close"],
         input: ["openai anthropic"],
       })
     );
 
-    const settingsPath = join(cwd, ".pi", "settings.json");
+    const settingsPath = join(homeDir, ".pi", "agent", "settings.json");
     const written = JSON.parse(readFileSync(settingsPath, "utf8")) as {
       copilotQueue?: { providers?: string[] };
     };
     assert.deepEqual(written.copilotQueue?.providers, ["openai", "anthropic"]);
   } finally {
     process.chdir(previousCwd);
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
     rmSync(cwd, { recursive: true, force: true });
+    rmSync(homeDir, { recursive: true, force: true });
   }
 });
 
@@ -853,17 +873,20 @@ void test("settings UI can update custom wait timeout after invalid input", asyn
   assert.ok(notifications.some((line) => line.includes("Enter a whole number 0 or greater.")));
 });
 
-void test("providers command updates project settings and managed provider scope", async () => {
+void test("providers command updates global settings and managed provider scope", async () => {
   const previousCwd = process.cwd();
+  const previousHome = process.env.HOME;
   const cwd = createTempDir();
+  const homeDir = createTempDir();
 
   try {
-    writeJson(join(cwd, ".pi", "settings.json"), {
+    writeJson(join(homeDir, ".pi", "agent", "settings.json"), {
       copilotQueue: {
         providers: ["github-copilot"],
       },
     });
     process.chdir(cwd);
+    process.env.HOME = homeDir;
 
     const captured = createCaptured();
     extension(createPi(captured));
@@ -880,7 +903,7 @@ void test("providers command updates project settings and managed provider scope
 
     await captured.commandHandler?.("providers openai anthropic", createCommandCtx());
 
-    const settingsPath = join(cwd, ".pi", "settings.json");
+    const settingsPath = join(homeDir, ".pi", "agent", "settings.json");
     const written = JSON.parse(readFileSync(settingsPath, "utf8")) as {
       copilotQueue?: { providers?: string[] };
     };
@@ -894,11 +917,17 @@ void test("providers command updates project settings and managed provider scope
     assert.match(afterUpdate.systemPrompt, /call the ask_user tool/i);
   } finally {
     process.chdir(previousCwd);
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
     rmSync(cwd, { recursive: true, force: true });
+    rmSync(homeDir, { recursive: true, force: true });
   }
 });
 
-void test("providers command updates global settings when scoped globally", async () => {
+void test("providers command still accepts the global prefix", async () => {
   const previousCwd = process.cwd();
   const previousHome = process.env.HOME;
   const cwd = createTempDir();
@@ -947,6 +976,24 @@ void test("providers command updates global settings when scoped globally", asyn
   }
 });
 
+void test("providers command rejects the removed project prefix", async () => {
+  const captured = createCaptured();
+  extension(createPi(captured));
+
+  const notifications: string[] = [];
+
+  assert.ok(captured.commandHandler);
+
+  await captured.commandHandler?.(
+    "providers project openai",
+    createCommandCtx(notifications, true)
+  );
+
+  assert.ok(
+    notifications.some((line) => line.includes("Project-scoped providers are no longer supported"))
+  );
+});
+
 function createTheme() {
   return {
     fg: (color: string, text: string) => `<${color}>${text}</${color}>`,
@@ -992,6 +1039,23 @@ function createToolCtx(options?: {
       theme: createTheme(),
       input: () => Promise.resolve(undefined),
       notify: (message: string) => options?.notifications?.push(message),
+      setStatus: (key: string, text?: string) => options?.statuses?.push({ key, text }),
+    },
+  };
+}
+
+function createSessionCtx(options?: {
+  provider?: string;
+  hasUI?: boolean;
+  statuses?: { key: string; text: string | undefined }[];
+}) {
+  return {
+    hasUI: options?.hasUI ?? true,
+    model: { provider: options?.provider ?? "github-copilot" },
+    sessionManager: { getBranch: () => [] },
+    ui: {
+      theme: createTheme(),
+      notify: () => undefined,
       setStatus: (key: string, text?: string) => options?.statuses?.push({ key, text }),
     },
   };

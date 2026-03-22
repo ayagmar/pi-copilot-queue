@@ -7,7 +7,6 @@ import {
   resolveConfiguredProviders,
   resolveShowStatusLine,
   writeGlobalConfiguredProviders,
-  writeProjectConfiguredProviders,
   writeShowStatusLine,
 } from "../src/config.js";
 
@@ -25,7 +24,7 @@ void test("resolveConfiguredProviders defaults to github-copilot", () => {
   const homeDir = createTempDir();
 
   try {
-    assert.deepEqual(resolveConfiguredProviders(cwd, homeDir), ["github-copilot"]);
+    assert.deepEqual(resolveConfiguredProviders(homeDir), ["github-copilot"]);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(homeDir, { recursive: true, force: true });
@@ -37,7 +36,7 @@ void test("resolveShowStatusLine defaults to true", () => {
   const homeDir = createTempDir();
 
   try {
-    assert.equal(resolveShowStatusLine(cwd, homeDir), true);
+    assert.equal(resolveShowStatusLine(homeDir), true);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(homeDir, { recursive: true, force: true });
@@ -55,55 +54,50 @@ void test("resolveConfiguredProviders reads global settings", () => {
       },
     });
 
-    assert.deepEqual(resolveConfiguredProviders(cwd, homeDir), ["github-copilot", "openai"]);
+    assert.deepEqual(resolveConfiguredProviders(homeDir), ["github-copilot", "openai"]);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(homeDir, { recursive: true, force: true });
   }
 });
 
-void test("resolveConfiguredProviders lets project settings override global settings", () => {
+void test("resolveConfiguredProviders ignores project settings", () => {
   const cwd = createTempDir();
   const homeDir = createTempDir();
 
   try {
-    writeJson(join(homeDir, ".pi", "agent", "settings.json"), {
-      copilotQueue: {
-        providers: ["github-copilot", "openai"],
-      },
-    });
     writeJson(join(cwd, ".pi", "settings.json"), {
       copilotQueue: {
         providers: ["anthropic"],
       },
     });
 
-    assert.deepEqual(resolveConfiguredProviders(cwd, homeDir), ["anthropic"]);
+    assert.deepEqual(resolveConfiguredProviders(homeDir), ["github-copilot"]);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(homeDir, { recursive: true, force: true });
   }
 });
 
-void test("resolveConfiguredProviders supports single-provider shorthand", () => {
+void test("resolveConfiguredProviders supports global single-provider shorthand", () => {
   const cwd = createTempDir();
   const homeDir = createTempDir();
 
   try {
-    writeJson(join(cwd, ".pi", "settings.json"), {
+    writeJson(join(homeDir, ".pi", "agent", "settings.json"), {
       copilotQueue: {
         provider: "openai",
       },
     });
 
-    assert.deepEqual(resolveConfiguredProviders(cwd, homeDir), ["openai"]);
+    assert.deepEqual(resolveConfiguredProviders(homeDir), ["openai"]);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(homeDir, { recursive: true, force: true });
   }
 });
 
-void test("resolveShowStatusLine lets project settings override global settings", () => {
+void test("resolveShowStatusLine reads global settings and ignores project overrides", () => {
   const cwd = createTempDir();
   const homeDir = createTempDir();
 
@@ -119,44 +113,28 @@ void test("resolveShowStatusLine lets project settings override global settings"
       },
     });
 
-    assert.equal(resolveShowStatusLine(cwd, homeDir), false);
+    assert.equal(resolveShowStatusLine(homeDir), true);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(homeDir, { recursive: true, force: true });
   }
 });
 
-void test("resolveConfiguredProviders allows disabling with an empty array", () => {
+void test("resolveConfiguredProviders allows disabling with an empty global array", () => {
   const cwd = createTempDir();
   const homeDir = createTempDir();
 
   try {
-    writeJson(join(cwd, ".pi", "settings.json"), {
+    writeJson(join(homeDir, ".pi", "agent", "settings.json"), {
       copilotQueue: {
         providers: [],
       },
     });
 
-    assert.deepEqual(resolveConfiguredProviders(cwd, homeDir), []);
+    assert.deepEqual(resolveConfiguredProviders(homeDir), []);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(homeDir, { recursive: true, force: true });
-  }
-});
-
-void test("writeProjectConfiguredProviders writes project settings", () => {
-  const cwd = createTempDir();
-
-  try {
-    const path = writeProjectConfiguredProviders(cwd, ["github-copilot", "openai"]);
-
-    assert.equal(path, join(cwd, ".pi", "settings.json"));
-    assert.deepEqual(resolveConfiguredProviders(cwd, cwd), ["github-copilot", "openai"]);
-
-    const raw = readFileSync(path, "utf8");
-    assert.match(raw, /"providers": \[\s+"github-copilot",\s+"openai"\s+\]/s);
-  } finally {
-    rmSync(cwd, { recursive: true, force: true });
   }
 });
 
@@ -165,10 +143,10 @@ void test("writeGlobalConfiguredProviders writes global settings", () => {
   const homeDir = createTempDir();
 
   try {
-    const path = writeGlobalConfiguredProviders(cwd, ["openai", "anthropic"], homeDir);
+    const path = writeGlobalConfiguredProviders(["openai", "anthropic"], homeDir);
 
     assert.equal(path, join(homeDir, ".pi", "agent", "settings.json"));
-    assert.deepEqual(resolveConfiguredProviders(cwd, homeDir), ["openai", "anthropic"]);
+    assert.deepEqual(resolveConfiguredProviders(homeDir), ["openai", "anthropic"]);
 
     const raw = readFileSync(path, "utf8");
     assert.match(raw, /"providers": \[\s+"openai",\s+"anthropic"\s+\]/s);
@@ -178,22 +156,24 @@ void test("writeGlobalConfiguredProviders writes global settings", () => {
   }
 });
 
-void test("writeShowStatusLine preserves configured providers", () => {
+void test("writeShowStatusLine preserves configured providers in global settings", () => {
   const cwd = createTempDir();
+  const homeDir = createTempDir();
 
   try {
-    writeJson(join(cwd, ".pi", "settings.json"), {
+    writeJson(join(homeDir, ".pi", "agent", "settings.json"), {
       copilotQueue: {
         providers: ["github-copilot", "openai"],
       },
     });
 
-    const path = writeShowStatusLine(cwd, false);
+    const path = writeShowStatusLine(false, homeDir);
 
-    assert.equal(path, join(cwd, ".pi", "settings.json"));
-    assert.deepEqual(resolveConfiguredProviders(cwd, cwd), ["github-copilot", "openai"]);
-    assert.equal(resolveShowStatusLine(cwd, cwd), false);
+    assert.equal(path, join(homeDir, ".pi", "agent", "settings.json"));
+    assert.deepEqual(resolveConfiguredProviders(homeDir), ["github-copilot", "openai"]);
+    assert.equal(resolveShowStatusLine(homeDir), false);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
+    rmSync(homeDir, { recursive: true, force: true });
   }
 });
