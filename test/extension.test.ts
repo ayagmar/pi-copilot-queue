@@ -44,7 +44,9 @@ function createPi(captured: Captured): ExtensionAPI {
     }) => {
       captured.toolName = def.name;
       captured.toolExecute = def.execute;
-      captured.toolRenderCall = def.renderCall;
+      if (def.renderCall) {
+        captured.toolRenderCall = def.renderCall;
+      }
     },
   } as unknown as ExtensionAPI;
 }
